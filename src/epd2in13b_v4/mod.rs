@@ -177,7 +177,7 @@ where
     /// Useful for rendering directly from progmem buffers.
     ///
     /// Example:
-    /// ```rust
+    /// ```rust no_run
     /// progmem! {
     ///     static progmem BLACK: [u8; 4000] = *include_bytes!("black.gray");
     ///     static progmem RED: [u8; 4000] = *include_bytes!("red.gray");
