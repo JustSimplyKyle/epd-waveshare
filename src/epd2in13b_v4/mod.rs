@@ -163,6 +163,79 @@ where
     }
 }
 
+impl<SPI, BUSY, DC, RST, DELAY> Epd2in13b<SPI, BUSY, DC, RST, DELAY>
+where
+    SPI: SpiDevice,
+    BUSY: InputPin,
+    DC: OutputPin,
+    RST: OutputPin,
+    DELAY: DelayNs,
+{
+    /// Transmit data to the SRAM of the EPD with the provided generators.
+    ///
+    /// Updates both the black and the secondary color layers
+    /// Useful for rendering directly from progmem buffers.
+    ///
+    /// Example:
+    /// ```rust
+    /// progmem! {
+    ///     static progmem BLACK: [u8; 4000] = *include_bytes!("black.gray");
+    ///     static progmem RED: [u8; 4000] = *include_bytes!("red.gray");
+    /// }
+    /// epd.update_color_frame_with(
+    ///     &mut spi,
+    ///     &mut delay,
+    ///     |i| BLACK.load_at(i),
+    ///     |i| RED.load_at(i),
+    ///     BLACK.len(),
+    ///     RED.len(),
+    /// )?;
+    /// ```
+    pub fn update_color_frame_with(
+        &mut self,
+        spi: &mut SPI,
+        delay: &mut DELAY,
+        black: impl Fn(usize) -> u8,
+        chromatic: impl Fn(usize) -> u8,
+        black_len: usize,
+        chromatic_len: usize,
+    ) -> Result<(), SPI::Error> {
+        self.update_achromatic_frame_with(spi, delay, black, black_len)?;
+        self.update_chromatic_frame_with(spi, delay, chromatic, chromatic_len)
+    }
+
+    /// Update only the black/white data of the display using a generator
+    ///
+    /// This must be finished by calling `update_chromatic_frame`.
+    pub fn update_achromatic_frame_with(
+        &mut self,
+        spi: &mut SPI,
+        _delay: &mut DELAY,
+        black: impl Fn(usize) -> u8,
+        len: usize,
+    ) -> Result<(), SPI::Error> {
+        self.interface.cmd(spi, Command::WriteRam)?;
+        self.interface.data_with(spi, black, len)?;
+        Ok(())
+    }
+
+    /// Update only the chromatic data of the display.
+    ///
+    /// This should be preceded by a call to `update_achromatic_frame`.
+    /// This data takes precedence over the black/white data.
+    pub fn update_chromatic_frame_with(
+        &mut self,
+        spi: &mut SPI,
+        _delay: &mut DELAY,
+        chromatic: impl Fn(usize) -> u8,
+        len: usize,
+    ) -> Result<(), SPI::Error> {
+        self.interface.cmd(spi, Command::WriteRamRed)?;
+        self.interface.data_with(spi, chromatic, len)?;
+        Ok(())
+    }
+}
+
 impl<SPI, BUSY, DC, RST, DELAY> WaveshareThreeColorDisplay<SPI, BUSY, DC, RST, DELAY>
     for Epd2in13b<SPI, BUSY, DC, RST, DELAY>
 where
