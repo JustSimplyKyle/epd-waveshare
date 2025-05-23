@@ -50,6 +50,9 @@
 //!# Ok(())
 //!# }
 //!```
+use core::convert::Infallible;
+
+use embedded_graphics_core::prelude::DrawTarget;
 // Original Waveforms from Waveshare
 use embedded_hal::{
     delay::DelayNs,
@@ -57,12 +60,12 @@ use embedded_hal::{
     spi::SpiDevice,
 };
 
-use crate::buffer_len;
 use crate::color::TriColor;
 use crate::interface::DisplayInterface;
 use crate::traits::{
     InternalWiAdditions, RefreshLut, WaveshareDisplay, WaveshareThreeColorDisplay,
 };
+use crate::{buffer_len, color::Color};
 
 pub(crate) mod command;
 use self::command::{
@@ -82,6 +85,29 @@ pub type Display2in13b = crate::graphics::Display<
     { buffer_len(WIDTH as usize, HEIGHT as usize) * 2 },
     TriColor,
 >;
+
+#[cfg(feature = "graphics")]
+/// buffered buffer
+pub type BufferMonoDisplay2in13b = crate::graphics::Display<
+    WIDTH,
+    { HEIGHT / BUFFER },
+    false,
+    { buffer_len(WIDTH as usize, (HEIGHT / BUFFER) as usize) },
+    Color,
+>;
+
+#[cfg(feature = "graphics")]
+/// buffered buffer
+pub type BufferChromaticDisplay2in13b = crate::graphics::Display<
+    WIDTH,
+    { HEIGHT / BUFFER },
+    false,
+    { buffer_len(WIDTH as usize, (HEIGHT / BUFFER) as usize) },
+    TriColor,
+>;
+
+/// buffers
+pub const BUFFER: u32 = 4;
 
 /// Width of the display.
 pub const WIDTH: u32 = 122;
@@ -400,6 +426,41 @@ where
     }
 }
 
+#[derive(Copy, Clone)]
+/// a type safe chunk reperesentation for BufferMonoDisplay
+pub enum Chunk {
+    /// the first chunk of the display
+    Buf1,
+    /// the second chunk of the display
+    Buf2,
+    /// the third chunk of the display
+    Buf3,
+    /// the fourth chunk of the display
+    Buf4,
+}
+
+impl Chunk {
+    /// converts chunk to a zero-indexed `u32`
+    pub fn to_zero_indexed(&self) -> u32 {
+        match self {
+            Chunk::Buf1 => 0,
+            Chunk::Buf2 => 1,
+            Chunk::Buf3 => 2,
+            Chunk::Buf4 => 3,
+        }
+    }
+    /// converts from zero-indexed `u32` to a `Chunk`
+    pub const fn from_zero_indexed(i: u32) -> Self {
+        match i {
+            0 => Chunk::Buf1,
+            1 => Chunk::Buf2,
+            2 => Chunk::Buf3,
+            3 => Chunk::Buf4,
+            _ => panic!("please check buffer"),
+        }
+    }
+}
+
 impl<SPI, BUSY, DC, RST, DELAY> Epd2in13b<SPI, BUSY, DC, RST, DELAY>
 where
     SPI: SpiDevice,
@@ -408,6 +469,89 @@ where
     RST: OutputPin,
     DELAY: DelayNs,
 {
+    /// Due to memory limitations on the arduino boards, this function allows the user to separate the 122x250 board into four 122x62.5(rounding to 63) subgrids.
+    ///
+    /// for usage on `mono_buffers` and colored_buffers`, please refer to the documentation of `update_achromatic_buffered` and `update_chromatic_buffered`
+    pub fn update_frame_buffered(
+        &mut self,
+        spi: &mut SPI,
+        delay: &mut DELAY,
+        mono_buffers: impl FnMut(&mut BufferMonoDisplay2in13b, Chunk) -> Result<Option<()>, Infallible>,
+        colored_buffers: impl FnMut(
+            &mut BufferMonoDisplay2in13b,
+            Chunk,
+        ) -> Result<Option<()>, Infallible>,
+    ) -> Result<(), SPI::Error> {
+        self.update_achromatic_buffered(spi, delay, mono_buffers)?;
+        self.update_chromatic_buffered(spi, delay, colored_buffers)
+    }
+
+    /// Due to memory limitations on the arduino boards, this function allows the user to separate the 122x250 board into four 122x62.5(rounding to 63) subgrids.
+    ///
+    /// IMPORTANT: this must be followed by `update_chromatic_buffered`, even if you're trying to only display purely mono content, otherwise the display won't be updated.
+    ///
+    /// `buffers`: A function that that should populate the content of each section of the display.
+    ///     - Takes a mutable reference to `BuffermonoDisplay2in13b` and a buffer index(0-3)
+    ///     - Returns `Result<Option<(), Infalliable>>`
+    ///         * `Ok(Some(()))` indicates successful execution.
+    ///         * `Ok(None)` indicates the buffer should be left unmodified, leaving it uncolored.
+    ///         * `Err(Infalliable)` is here purely for allowing `?` with `embedded-graphics` draw operations.
+    pub fn update_achromatic_buffered(
+        &mut self,
+        spi: &mut SPI,
+        _delay: &mut DELAY,
+        mut buffers: impl FnMut(&mut BufferMonoDisplay2in13b, Chunk) -> Result<Option<()>, Infallible>,
+    ) -> Result<(), SPI::Error> {
+        self.interface.cmd(spi, Command::WriteRam)?;
+        for i in 0..BUFFER {
+            let mut buffer = BufferMonoDisplay2in13b::default();
+            if buffers(&mut buffer, Chunk::from_zero_indexed(i))
+                .unwrap()
+                .is_none()
+            {
+                buffer.clear(Color::White).unwrap();
+            }
+            let data = buffer.buffer();
+            self.interface.data(spi, data)?;
+        }
+        Ok(())
+    }
+
+    /// Due to memory limitations on the arduino boards, this function allows the user to separate the 122x250 board into four 122x62.5(rounding to 63) subgrids.
+    ///
+    /// IMPORTANT: this function must be called after `update_achromatic_buffered`, even if you're trying to only display purely mono content, otherwise the display won't be updated.
+    ///
+    /// The usage of color within `BufferMonoDisplay2in13b` is a misnomer. `Color::White` stands for colored(red), while `Color::Black` stands for uncolored(white).
+    ///
+    /// `buffers`: A function that that should populate the content of each section of the display.
+    ///     - Takes a mutable reference to `BufferMonoDisplay2in13b` and a buffer index(0-3)
+    ///     - Returns `Result<Option<(), Infalliable>>`
+    ///         * `Ok(Some(()))` indicates successful execution
+    ///         * `Ok(None)` indicates the buffer should be left unmodified, leaving it uncolored.
+    ///         * `Err(Infalliable)` is here purely for allowing `?` with `embedded-graphics` draw operations.
+    pub fn update_chromatic_buffered(
+        &mut self,
+        spi: &mut SPI,
+        delay: &mut DELAY,
+        mut buffers: impl FnMut(&mut BufferMonoDisplay2in13b, Chunk) -> Result<Option<()>, Infallible>,
+    ) -> Result<(), SPI::Error> {
+        self.command(spi, Command::WriteRamRed)?;
+        let mut buffer = BufferMonoDisplay2in13b::default();
+        for i in 0..BUFFER {
+            if buffers(&mut buffer, Chunk::from_zero_indexed(i))
+                .unwrap()
+                .is_none()
+            {
+                buffer.clear(Color::Black).unwrap();
+            }
+            let data = buffer.buffer();
+            self.interface.data(spi, data)?;
+        }
+        self.interface.cmd(spi, Command::MasterActivation)?;
+        self.wait_until_idle(spi, delay)?;
+        Ok(())
+    }
+
     fn set_display_update_control(
         &mut self,
         spi: &mut SPI,
